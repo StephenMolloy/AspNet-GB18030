@@ -3,12 +3,29 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
 using System.Text;
+using System.Web.UI;
 using Gb18030.Shared;
 
 namespace Gb18030.TestDriver
 {
     internal class Program
     {
+        // Ordered by practical prevalence / importance for legacy verification.
+        internal static readonly string[] OrderedCommonEncodings = new[]
+        {
+            "utf-8",
+            "us-ascii",
+            "gb18030",
+            "gbk",
+            "gb2312",
+            "big5",
+            "shift_jis",
+            "euc-jp",
+            "euc-kr",
+            "windows-1252",
+            "windows-1251",
+            "koi8-r",
+        };
         static int Main(string[] args)
         {
             var options = CliOptions.Parse(args);
@@ -45,16 +62,16 @@ namespace Gb18030.TestDriver
                 activeStrings = allStrings;
             }
 
+            var encName = options.EncodingName;
             var http = new HttpClient();
-            var tester = new WebPageTester(http, options.BaseUrl, options.EncodingName, custom ? activeStrings : allStrings, custom ? activeStrings[0] : null, options.Verbose);
-
+            var tester = new WebPageTester(http, options.BaseUrl, encName, custom ? activeStrings : allStrings, custom ? activeStrings[0] : null, options.Verbose);
             var aggregate = new List<ControlTestResult>();
 
             if (custom)
             {
                 foreach (var page in tester.PagesToTest)
                 {
-                    ProcessPage(tester, page, 0, activeStrings[0], options.Verbose, aggregate);
+                    ProcessPage(tester, page, 0, activeStrings[0], options.Verbose, aggregate, encName);
                 }
             }
             else if (options.SingleIndex.HasValue)
@@ -62,7 +79,7 @@ namespace Gb18030.TestDriver
                 int idx = options.SingleIndex.Value;
                 foreach (var page in tester.PagesToTest)
                 {
-                    ProcessPage(tester, page, idx, allStrings[idx], options.Verbose, aggregate);
+                    ProcessPage(tester, page, idx, allStrings[idx], options.Verbose, aggregate, encName);
                 }
             }
             else
@@ -72,7 +89,7 @@ namespace Gb18030.TestDriver
                     var expected = activeStrings[i];
                     foreach (var page in tester.PagesToTest)
                     {
-                        ProcessPage(tester, page, i, expected, options.Verbose, aggregate);
+                        ProcessPage(tester, page, i, expected, options.Verbose, aggregate, encName);
                     }
                 }
             }
@@ -81,20 +98,20 @@ namespace Gb18030.TestDriver
             return aggregate.Any(r => !r.Passed) ? 2 : 0;
         }
 
-        private static void ProcessPage(WebPageTester tester, string page, int index, string expected, bool verbose, List<ControlTestResult> aggregate)
+        private static void ProcessPage(WebPageTester tester, string page, int index, string expected, bool verbose, List<ControlTestResult> aggregate, string encName)
         {
             var pageResults = tester.TestPage(page, index, expected).ToList();
             aggregate.AddRange(pageResults);
             if (verbose)
             {
-                WriteSeparator($"PAGE {page} index={index} HTML", ConsoleColor.Cyan);
+                WriteSeparator($"PAGE {page} index={index} enc={encName} HTML", ConsoleColor.Cyan);
                 Console.ForegroundColor = ConsoleColor.DarkGray;
                 Console.WriteLine(tester.LastHtml);
                 Console.ResetColor();
                 var pass = pageResults.Count(r => r.Passed);
                 var fail = pageResults.Count - pass;
                 var color = fail == 0 ? ConsoleColor.Green : ConsoleColor.Red;
-                WriteSeparator($"PAGE SUMMARY {page} index={index}: {pass}/{pageResults.Count} passed, {fail} failed", color);
+                WriteSeparator($"PAGE SUMMARY {page} index={index} enc={encName}: {pass}/{pageResults.Count} passed, {fail} failed", color);
             }
         }
 
@@ -122,17 +139,39 @@ namespace Gb18030.TestDriver
             {
                 Console.WriteLine();
                 WriteSeparator("FAILURES", ConsoleColor.Red);
-                foreach (var f in results.Where(r => !r.Passed).Take(200))
+                var failures = results.Where(r => !r.Passed).ToList();
+                // Group by identical expected/actual pairs
+                var groups = failures.GroupBy(f => $"{f.Expected}##{f.Actual}");
+                int groupCount = 0;
+                const int maxGroups = 200; // cap to avoid flooding
+                foreach (var grp in groups)
                 {
-                    WriteFailureLine(f);
+                    // One diff block per group
+                    if (groupCount < maxGroups)
+                    {
+                        string expected = "", actual = "";
+                        // Scenario lines first
+                        foreach (var f in grp)
+                        {
+                            WriteFailureScenarioLine(f);
+                            expected = f.Expected;
+                            actual = f.Actual;
+                        }
+                        WriteFailureDiffBlock(expected, actual);
+                        groupCount++;
+                    }
+                    if (groupCount >= maxGroups)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Yellow;
+                        Console.WriteLine($"... truncated after {maxGroups} failure groups ...");
+                        Console.ResetColor();
+                        break;
+                    }
                 }
             }
-            else
+            else if (verbose)
             {
-                if (verbose)
-                {
-                    WriteSeparator("NO FAILURES", ConsoleColor.Green);
-                }
+                WriteSeparator("NO FAILURES", ConsoleColor.Green);
             }
         }
 
@@ -155,27 +194,27 @@ namespace Gb18030.TestDriver
             Console.ForegroundColor = prev;
         }
 
-        private static void WriteFailureLine(ControlTestResult f)
+        private static void WriteFailureScenarioLine(ControlTestResult f)
         {
-            string exp = f.Expected ?? string.Empty;
-            string act = f.Actual ?? string.Empty;
-            // Compute per-character match using LCS so inserts/deletes highlighted.
-            bool[] expMatch, actMatch;
-            ComputeDiffMatchMasks(exp, act, out expMatch, out actMatch);
-
             Console.Write("[");
             var prev = Console.ForegroundColor;
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.Write(f.ControlId);
             Console.ForegroundColor = prev;
             Console.WriteLine($"] Page={f.Page} Index={f.StringIndex} Reason={f.Message}");
+        }
 
+        private static void WriteFailureDiffBlock(string expected, string actual)
+        {
+            expected = expected ?? string.Empty;
+            actual = actual ?? string.Empty;
+            bool[] expMatch, actMatch;
+            ComputeDiffMatchMasks(expected, actual, out expMatch, out actMatch);
             Console.Write("    Expected='");
-            WriteDiffString(exp, expMatch, ConsoleColor.Yellow, ConsoleColor.Red);
+            WriteDiffString(expected, expMatch, ConsoleColor.Yellow, ConsoleColor.Red);
             Console.WriteLine("'");
-
             Console.Write("      Actual='");
-            WriteDiffString(act, actMatch, ConsoleColor.Yellow, ConsoleColor.Red);
+            WriteDiffString(actual, actMatch, ConsoleColor.Yellow, ConsoleColor.Red);
             Console.WriteLine("'");
         }
 
@@ -256,8 +295,28 @@ namespace Gb18030.TestDriver
 
         public static void PrintHelp()
         {
-            Console.WriteLine("Usage: TestDriver --baseUrl http://localhost:12345 [--encoding utf-8] [--index N] [--string \"custom text\"] [--verbose]");
-            Console.WriteLine("  --string takes precedence over --index if both are supplied.");
+            Console.WriteLine("Usage: TestDriver --baseUrl http://localhost:12345 [--encoding <name> | --all-encodings | --topN N] [--index N] [--string \"custom text\"] [--verbose]");
+            Console.WriteLine();
+            Console.WriteLine("Options:");
+            Console.WriteLine("  --baseUrl          Base URL to the test web application (required)");
+            Console.WriteLine("  --encoding <name>  Single character encoding to test (default utf-8 if omitted)");
+            Console.WriteLine("  --index N          Test only a single string at zero-based index N");
+            Console.WriteLine("  --string S         Test only the literal string S (overrides --index)");
+            Console.WriteLine("  --verbose          Verbose output: requests, raw HTML, per-page summaries, diff highlighting");
+            Console.WriteLine("  --help             Show this help");
+            Console.WriteLine();
+            Console.WriteLine("Precedence: --string overrides --index. Multi-encoding options override --encoding.");
+            Console.WriteLine();
+            Console.WriteLine("Common encodings:");
+            foreach (var e in Program.OrderedCommonEncodings)
+            {
+                Console.WriteLine("  " + e);
+            }
+            Console.WriteLine();
+            Console.WriteLine("Notes:");
+            Console.WriteLine("  - Prefer utf-8 unless specifically validating legacy behavior.");
+            Console.WriteLine("  - gb18030 enables full Unicode round-trip including supplementary planes.");
+            Console.WriteLine("  - Many legacy labels are normalized internally by browsers (e.g., iso-8859-1 -> windows-1252).");
         }
     }
 }

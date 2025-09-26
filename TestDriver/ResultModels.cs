@@ -5,6 +5,7 @@ namespace Gb18030.TestDriver
         public string Page { get; set; }
         public string ControlId { get; set; }
         public int StringIndex { get; set; }
+        public string EncodingName { get; set; }
         public string Expected { get; set; }
         public string Actual { get; set; }
         public bool Passed { get; set; }

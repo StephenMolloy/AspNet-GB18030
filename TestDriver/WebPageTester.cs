@@ -13,6 +13,7 @@ namespace Gb18030.TestDriver
         private readonly HttpClient _http;
         private readonly string _baseUrl;
         private readonly string _encodingName;
+        private readonly Encoding _explicitEncoding;
         private readonly string[] _allStrings;
         private readonly string _overrideString;
         private readonly bool _verbose;
@@ -28,6 +29,17 @@ namespace Gb18030.TestDriver
             _allStrings = allStrings;
             _overrideString = overrideString;
             _verbose = verbose;
+            if (!string.IsNullOrWhiteSpace(_encodingName))
+            {
+                try
+                {
+                    _explicitEncoding = Encoding.GetEncoding(_encodingName);
+                }
+                catch (Exception ex)
+                {
+                    throw new ArgumentException($"Unknown or unsupported encoding: '{_encodingName}'", nameof(encodingName), ex);
+                }
+            }
         }
 
         public string[] PagesToTest => new[] { "BasicControls.aspx", "DataControls.aspx" };
@@ -39,13 +51,8 @@ namespace Gb18030.TestDriver
             if (_verbose) Console.WriteLine("REQUEST: " + url);
             if (!string.IsNullOrEmpty(_encodingName)) url += "&enc=" + Uri.EscapeDataString(_encodingName);
             var bytes = _http.GetByteArrayAsync(url).GetAwaiter().GetResult();
-            // Determine encoding (simple: use header if available else UTF-8)
-            // For now just decode as UTF-8 or specified encoding if provided
-            Encoding enc = Encoding.UTF8;
-            if (!string.IsNullOrEmpty(_encodingName))
-            {
-                try { enc = Encoding.GetEncoding(_encodingName); } catch { }
-            }
+            // Decode using validated explicit encoding if provided else UTF-8
+            Encoding enc = _explicitEncoding ?? Encoding.UTF8;
             var html = enc.GetString(bytes);
             _lastHtml = html; // store raw HTML so caller can optionally output it
             var doc = new HtmlDocument();
@@ -59,7 +66,8 @@ namespace Gb18030.TestDriver
                     Page = page,
                     ControlId = controlId,
                     StringIndex = index,
-                    Expected = ExpectedFor(controlId, index, expected)
+                    Expected = ExpectedFor(controlId, index, expected),
+                    EncodingName = _encodingName
                 };
                 try
                 {
